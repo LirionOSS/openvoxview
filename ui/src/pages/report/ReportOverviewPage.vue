@@ -6,7 +6,20 @@ import { useI18n } from 'vue-i18n';
 import { type QTableColumn } from 'quasar';
 import NodeLink from 'components/NodeLink.vue';
 import PqlQuery, { PqlEntity, PqlSortOrder } from 'src/puppet/query-builder';
-import { type ApiPuppetReport, PuppetReport } from 'src/puppet/models/puppet-report';
+import {
+  type ApiPuppetReport,
+  PuppetReport,
+} from 'src/puppet/models/puppet-report';
+import { useSettingsStore } from 'stores/settings';
+import { useRoute, useRouter } from 'vue-router';
+
+interface PaginationInterface {
+  sortBy?: string | null;
+  descending?: boolean;
+  page?: number;
+  rowsPerPage?: number;
+  rowsNumber?: number;
+}
 
 const { t } = useI18n();
 const reports = ref<PuppetReport[]>([]);
@@ -14,8 +27,13 @@ const isLoading = ref(false);
 const filter = ref('');
 const filterEndTimeStart = ref<string | null>(null);
 const filterEndTimeEnd = ref<string | null>(null);
+const filterOnlyLatest = ref(false);
+const filterExpanded = ref(true);
+const settings = useSettingsStore();
 
-const filterStatus = ref(['failed', 'changed', 'unchanged', 'noop']);
+const route = useRoute();
+const router = useRouter();
+const filterStatus = ref<string[]>(['failed', 'changed', 'unchanged', 'noop']);
 const filterOptions = ref([
   {
     label: t('LABEL_FAILED'),
@@ -35,9 +53,9 @@ const filterOptions = ref([
   },
 ]);
 
-const pagination = ref({
+const pagination = ref<PaginationInterface>({
   sortBy: 'end_time',
-  descending: false,
+  descending: true,
   page: 1,
   rowsPerPage: 100,
   rowsNumber: 10,
@@ -49,12 +67,14 @@ const columns: QTableColumn[] = [
     field: 'endTimeFormatted',
     label: t('LABEL_END_TIME'),
     align: 'left',
+    sortable: true,
   },
   {
     name: 'status',
     field: 'status',
     label: t('LABEL_STATUS'),
     align: 'left',
+    sortable: true,
   },
   {
     name: 'certname',
@@ -68,9 +88,10 @@ const columns: QTableColumn[] = [
     field: 'configuration_version',
     label: t('LABEL_CONFIGURATION_VERSION'),
     align: 'left',
+    sortable: true,
   },
   {
-    name: 'agent_version',
+    name: 'puppet_version',
     field: 'puppet_version',
     label: t('LABEL_AGENT_VERSION'),
     align: 'left',
@@ -81,10 +102,13 @@ const columns: QTableColumn[] = [
 function loadReports() {
   isLoading.value = true;
 
+  updateRoute();
+
   const { page, rowsPerPage, sortBy, descending } = pagination.value;
   const query = new PqlQuery(PqlEntity.Reports);
   if (filter.value && filter.value != '') {
-    query.filter()
+    query
+      .filter()
       .newGroup()
       .or()
       .regex('certname', filter.value)
@@ -93,7 +117,7 @@ function loadReports() {
   }
 
   if (filterEndTimeStart.value || filterEndTimeEnd.value) {
-    const group = query.filter().newGroup()
+    const group = query.filter().newGroup();
 
     if (filterEndTimeStart.value) {
       group.and().greaterThanEqual('end_time', filterEndTimeStart.value);
@@ -105,22 +129,39 @@ function loadReports() {
   }
 
   if (filterStatus.value.length > 0) {
-    query.filter().newGroup().and()
-      .in('status', filterStatus.value);
+    query.filter().newGroup().and().in('status', filterStatus.value);
   }
 
-  const start = (page - 1) * rowsPerPage;
+  if (filterOnlyLatest.value) {
+    query.filter().and().equal('latest_report?', true);
+  }
 
-  query
-    .sortBy()
-    .add(sortBy, descending ? PqlSortOrder.Descending : PqlSortOrder.Ascending);
-  query.limit(rowsPerPage);
-  query.offset(start);
+  if (settings.hasEnvironment()) {
+    query.filter().and().equal('environment', settings.environment);
+  }
+
+  const start = ((page ?? 1) - 1) * (rowsPerPage ?? 0);
+
+  if (sortBy) {
+    query
+      .sortBy()
+      .add(
+        sortBy,
+        descending ? PqlSortOrder.Descending : PqlSortOrder.Ascending,
+      );
+  }
+
+  if (rowsPerPage) {
+    query.limit(rowsPerPage);
+    query.offset(start);
+  }
 
   void Backend.getQueryResult<ApiPuppetReport[]>(query)
     .then((result) => {
       if (result.status === 200) {
-        reports.value = result.data.Data.Data.map(s => PuppetReport.fromApi(s));
+        reports.value = result.data.Data.Data.map((s) =>
+          PuppetReport.fromApi(s),
+        );
       }
     })
     .finally(() => {
@@ -128,24 +169,74 @@ function loadReports() {
     });
 }
 
-function onRequest() {
+function updateRoute() {
+  void router.replace({
+    name: route.name,
+    query: {
+      filter: filter.value,
+      status: filterStatus.value,
+      endTimeStart: filterEndTimeStart.value,
+      endTimeEnd: filterEndTimeEnd.value,
+      onlyLatest: filterOnlyLatest.value ? 'true' : 'false',
+    },
+  });
+}
+
+function onRequest(props: { pagination: PaginationInterface }) {
+  pagination.value = props.pagination;
   loadReports();
 }
 
 watch(filterStatus, () => {
   loadReports();
-})
+});
 
 watch(filterEndTimeStart, () => {
   loadReports();
-})
+});
 
 watch(filterEndTimeEnd, () => {
   loadReports();
-})
+});
 
 onMounted(() => {
-  loadReports();
+  let hasFilter = false;
+  if (route.query.status) {
+    filterStatus.value = route.query.status as string[];
+    hasFilter = true;
+  }
+
+  if (route.query.filter) {
+    filter.value = route.query.filter as string;
+    hasFilter = true;
+  }
+
+  if (route.query.endTimeStart) {
+    filterEndTimeStart.value = route.query.endTimeStart as string;
+    hasFilter = true;
+  }
+
+  if (route.query.endTimeEnd) {
+    filterEndTimeEnd.value = route.query.endTimeEnd as string;
+    hasFilter = true;
+  }
+
+  if (route.query.onlyLatest) {
+    filterOnlyLatest.value = route.query.onlyLatest === 'true';
+    hasFilter = true;
+  }
+
+  if (hasFilter) {
+    loadReports();
+  }
+
+  watch(
+    () => settings.environment,
+    () => {
+      loadReports();
+    },
+    { immediate: true },
+  );
 });
 </script>
 
@@ -153,56 +244,89 @@ onMounted(() => {
   <q-page padding>
     <q-card>
       <q-card-section class="bg-primary text-white text-h6">
-        {{ $t('LABEL_FILTER') }}
-      </q-card-section>
-      <q-card-section>
-        <q-input
-          debounce="300"
-          v-model="filter"
-          :placeholder="$t('LABEL_SEARCH')"
-          class="full-width"
-        />
-        <q-select
-          :label="$t('LABEL_STATUS')"
-          v-model="filterStatus"
-          :options="filterOptions"
-          multiple
-          use-chips
-          map-options
-          emit-value
-          class="full-width"
-        >
-          <template v-slot:option="{ itemProps, opt, selected, toggleOption }">
-            <q-item v-bind="itemProps">
-              <q-item-section>
-                <q-item-label>{{ opt.label }}</q-item-label>
-              </q-item-section>
-              <q-item-section side>
-                <q-toggle
-                  :model-value="selected"
-                  @update:model-value="toggleOption(opt)"
-                />
-              </q-item-section>
-            </q-item>
-          </template>
-        </q-select>
         <div class="row">
-          <div class="col q-py-md q-pr-md">
-            <q-input
-              type="date"
-              v-model="filterEndTimeStart"
-              :label="$t('LABEL_END_TIME_START')"
-            />
-          </div>
-          <div class="col q-py-md">
-            <q-input
-              type="date"
-              v-model="filterEndTimeEnd"
-              :label="$t('LABEL_END_TIME_START')"
-            />
-          </div>
+          {{ $t('LABEL_FILTER') }}
+          <q-space />
+          <q-btn
+            color="grey"
+            round
+            flat
+            dense
+            :icon="filterExpanded ? 'keyboard_arrow_up' : 'keyboard_arrow_down'"
+            @click="filterExpanded = !filterExpanded"
+          />
         </div>
       </q-card-section>
+      <q-slide-transition>
+        <div v-show="filterExpanded">
+          <q-card-section>
+            <q-input
+              debounce="300"
+              v-model="filter"
+              :placeholder="$t('LABEL_SEARCH')"
+              class="full-width"
+            />
+            <q-select
+              :label="$t('LABEL_STATUS')"
+              v-model="filterStatus"
+              :options="filterOptions"
+              multiple
+              use-chips
+              map-options
+              emit-value
+              class="full-width"
+            >
+              <template
+                v-slot:option="{ itemProps, opt, selected, toggleOption }"
+              >
+                <q-item v-bind="itemProps">
+                  <q-item-section>
+                    <q-item-label>{{ opt.label }}</q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-toggle
+                      :model-value="selected"
+                      @update:model-value="toggleOption(opt)"
+                    />
+                  </q-item-section>
+                </q-item>
+              </template>
+            </q-select>
+            <div class="row">
+              <div class="col q-py-md q-pr-md">
+                <q-input
+                  type="date"
+                  v-model="filterEndTimeStart"
+                  :label="$t('LABEL_END_TIME_START')"
+                />
+              </div>
+              <div class="col q-py-md">
+                <q-input
+                  type="date"
+                  v-model="filterEndTimeEnd"
+                  :label="$t('LABEL_END_TIME_START')"
+                />
+              </div>
+            </div>
+            <div class="row">
+              <div class="col q-py-md q-pr-md">
+                <q-toggle
+                  v-model="filterOnlyLatest"
+                  :label="$t('LABEL_SHOW_ONLY_LATEST_REPORTS')"
+                />
+              </div>
+            </div>
+            <div class="row">
+              <q-btn
+                class="full-width"
+                color="primary"
+                @click="loadReports"
+                :label="$t('LABEL_APPLY_FILTERS')"
+              />
+            </div>
+          </q-card-section>
+        </div>
+      </q-slide-transition>
     </q-card>
     <q-table
       :rows="reports"
@@ -215,8 +339,11 @@ onMounted(() => {
       binary-state-sort
       @request="onRequest"
       class="q-mt-md"
-      table-header-class="bg-primary text-white"
+      :title="$t('LABEL_REPORT', 2)"
     >
+      <template v-slot:top-right>
+        <q-btn icon="refresh" color="secondary" @click="loadReports" />
+      </template>
       <template v-slot:body="props">
         <q-tr :props="props">
           <q-td v-for="col in props.cols" :key="col.name" :props="props">
@@ -224,7 +351,7 @@ onMounted(() => {
               <NodeLink :certname="col.value" />
             </div>
             <div v-else-if="col.name == 'status'">
-              <ReportStatus :report="props.row"/>
+              <ReportStatus :report="props.row" />
             </div>
             <div v-else class="text-subtitle1">
               {{ col.value }}
@@ -236,6 +363,4 @@ onMounted(() => {
   </q-page>
 </template>
 
-<style scoped>
-
-</style>
+<style scoped></style>

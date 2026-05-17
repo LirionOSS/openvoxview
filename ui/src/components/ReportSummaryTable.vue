@@ -4,12 +4,13 @@ import { type PuppetReport } from 'src/puppet/models/puppet-report';
 import { useI18n } from 'vue-i18n';
 import { emptyPagination } from 'src/helper/objects';
 import { formatTimestamp } from 'src/helper/functions';
+import NodeLink from 'components/NodeLink.vue';
 
-const {t} = useI18n();
-const reports = defineModel('reports', {type: Array<PuppetReport>, required: true})
-const flat = defineModel('flat', {type: Boolean, default: false})
+const { t } = useI18n();
+const reports = defineModel('reports', { type: Array<PuppetReport>, required: true })
+const flat = defineModel('flat', { type: Boolean, default: false })
 
-const columns: QTableColumn[]  = [
+const columns: QTableColumn[] = [
   {
     name: 'certname',
     field: 'certname',
@@ -27,14 +28,14 @@ const columns: QTableColumn[]  = [
     field: 'start_time',
     label: t('LABEL_START_TIME'),
     align: 'left',
-    format: val => formatTimestamp(val, true),
+    format: val => formatTimestamp(val, true) ?? '&mdash;',
   },
   {
     name: 'end_time',
     field: 'end_time',
     label: t('LABEL_END_TIME'),
     align: 'left',
-    format: val => formatTimestamp(val, true),
+    format: val => formatTimestamp(val, true) ?? '&mdash;',
   },
   {
     name: 'duration',
@@ -47,9 +48,13 @@ const columns: QTableColumn[]  = [
 </script>
 
 <template>
-  <q-table :columns="columns" :rows="reports" :flat="flat" :pagination="emptyPagination" hide-pagination/>
+  <q-table :columns="columns" :rows="reports" :flat="flat" :pagination="emptyPagination" hide-pagination>
+    <template #body-cell-certname="props">
+      <q-td :props="props">
+        <NodeLink :certname="props.row.certname" />
+      </q-td>
+    </template>
+  </q-table>
 </template>
 
-<style scoped>
-
-</style>
+<style scoped></style>

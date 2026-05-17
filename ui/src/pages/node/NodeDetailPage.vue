@@ -1,23 +1,27 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import Backend from 'src/client/backend';
 import { type ApiPuppetFact, PuppetFact } from 'src/puppet/models';
 import ReportStatus from 'components/ReportStatus.vue';
 import { type ApiPuppetNode, PuppetNode } from 'src/puppet/models/puppet-node';
-import { type ApiPuppetReport, PuppetReport } from 'src/puppet/models/puppet-report';
+import {
+  type ApiPuppetReport,
+  PuppetReport,
+} from 'src/puppet/models/puppet-report';
 import { formatTimestamp } from 'src/helper/functions';
 import PqlQuery, { PqlEntity, PqlSortOrder } from 'src/puppet/query-builder';
 import { type QTableColumn, useQuasar } from 'quasar';
 import { useI18n } from 'vue-i18n';
 import { JsonViewer } from 'vue3-json-viewer';
-import "vue3-json-viewer/dist/vue3-json-viewer.css";
+import 'vue3-json-viewer/dist/vue3-json-viewer.css';
+import { useSettingsStore } from 'stores/settings';
 
 const q = useQuasar();
 const { t } = useI18n();
 const route = useRoute();
 const node = computed(() => {
-  return route.params.node as string
+  return route.params.node as string;
 });
 
 const node_info = ref<PuppetNode>();
@@ -25,6 +29,7 @@ const node_facts = ref<PuppetFact[]>([]);
 const reports = ref<PuppetReport[]>([]);
 const needle = ref<string | null>(null);
 const isLoading = ref(true);
+const settings = useSettingsStore();
 
 const isReportsLoading = ref(true);
 
@@ -65,22 +70,38 @@ const pagination = ref({
 });
 
 function loadFacts() {
-  const query = `facts {certname = '${node.value}' }`;
+  const queryBuilder = new PqlQuery(PqlEntity.Facts);
+  queryBuilder.filter().and().equal('certname', node.value);
 
-  void Backend.getRawQueryResult<ApiPuppetFact[]>(query).then((result) => {
-    if (result.status === 200) {
-      node_facts.value = result.data.Data.Data.map((s) =>
-        PuppetFact.fromApi(s)
-      );
-    }
-  });
+  if (settings.hasEnvironment()) {
+    queryBuilder.filter().and().equal('environment', settings.environment);
+  }
+
+  void Backend.getRawQueryResult<ApiPuppetFact[]>(queryBuilder.build()).then(
+    (result) => {
+      if (result.status === 200) {
+        node_facts.value = result.data.Data.Data.map((s) =>
+          PuppetFact.fromApi(s),
+        );
+      }
+    },
+  );
 }
 
 function loadNodeInfo() {
-  const query = `nodes { certname = '${node.value}' }`;
+  const queryBuilder = new PqlQuery(PqlEntity.Nodes);
+  queryBuilder.filter().and().equal('certname', node.value);
+
+  if (settings.hasEnvironment()) {
+    queryBuilder
+      .filter()
+      .and()
+      .equal('catalog_environment', settings.environment);
+  }
+
   isLoading.value = true;
 
-  void Backend.getRawQueryResult<ApiPuppetNode[]>(query)
+  void Backend.getRawQueryResult<ApiPuppetNode[]>(queryBuilder.build())
     .then((result) => {
       if (result.status === 200) {
         node_info.value = PuppetNode.fromApi(result.data.Data.Data[0]!);
@@ -95,6 +116,9 @@ function loadReports() {
   isReportsLoading.value = true;
   const query = new PqlQuery(PqlEntity.Reports);
   query.filter().and().equal('certname', node.value);
+  if (settings.hasEnvironment()) {
+    query.filter().and().equal('environment', settings.environment);
+  }
   query.sortBy().add('end_time', PqlSortOrder.Descending);
   query.limit(10);
 
@@ -102,7 +126,7 @@ function loadReports() {
     .then((result) => {
       if (result.status === 200) {
         reports.value = result.data.Data.Data.map((s) =>
-          PuppetReport.fromApi(s)
+          PuppetReport.fromApi(s),
         );
       }
     })
@@ -111,10 +135,20 @@ function loadReports() {
     });
 }
 
-onMounted(() => {
+function load() {
   loadNodeInfo();
   loadReports();
   loadFacts();
+}
+
+onMounted(() => {
+  watch(
+    () => settings.environment,
+    () => {
+      load();
+    },
+    { immediate: true },
+  );
 });
 </script>
 
@@ -136,19 +170,19 @@ onMounted(() => {
                 <tr>
                   <td class="text-left text-bold">Facts</td>
                   <td class="text-left">
-                    {{ formatTimestamp(node_info.facts_timestamp) }}
+                    {{ node_info.facts_timestamp ? formatTimestamp(node_info.facts_timestamp) : '&mdash;' }}
                   </td>
                 </tr>
                 <tr>
                   <td class="text-left text-bold">Catalog</td>
                   <td class="text-left">
-                    {{ formatTimestamp(node_info.catalog_timestamp) }}
+                    {{ node_info.catalog_timestamp ? formatTimestamp(node_info.catalog_timestamp) : '&mdash;' }}
                   </td>
                 </tr>
                 <tr>
                   <td class="text-left text-bold">Report</td>
                   <td class="text-left">
-                    {{ formatTimestamp(node_info.report_timestamp) }}
+                    {{ node_info.report_timestamp ? formatTimestamp(node_info.report_timestamp) : '&mdash;' }}
                   </td>
                 </tr>
               </tbody>
@@ -160,31 +194,14 @@ onMounted(() => {
             {{ $t('LABEL_REPORT', 2) }}
           </q-card-section>
           <q-card-section class="q-pa-none">
-            <q-table
-              v-if="!isReportsLoading"
-              :rows="reports"
-              :columns="columns"
-              row-key="hash"
-              v-model:pagination="pagination"
-              wrap-cells
-              :loading="isReportsLoading"
-              binary-state-sort
-              table-header-class="bg-primary text-white"
-              flat
-              square
-            >
+            <q-table v-if="!isReportsLoading" :rows="reports" :columns="columns" row-key="hash"
+              v-model:pagination="pagination" wrap-cells :loading="isReportsLoading" binary-state-sort
+              table-header-class="bg-primary text-white" flat square>
               <template v-slot:body="props">
                 <q-tr :props="props">
-                  <q-td
-                    v-for="col in props.cols"
-                    :key="col.name"
-                    :props="props"
-                  >
+                  <q-td v-for="col in props.cols" :key="col.name" :props="props">
                     <div v-if="col.name == 'status'">
-                      <ReportStatus
-                        :report="props.row"
-                        :inline="q.screen.gt.md"
-                      />
+                      <ReportStatus :report="props.row" :inline="q.screen.gt.md" />
                     </div>
                     <div v-else class="text-subtitle1">
                       {{ col.value }}
@@ -214,13 +231,8 @@ onMounted(() => {
               <tr v-for="fact in filteredFacts" :key="fact.name">
                 <td>{{ fact.name }}</td>
                 <td class="text-left">
-                  <JsonViewer
-                    :value="fact.value"
-                    expanded
-                    :expand-depth="-1"
-                    :theme="q.dark.isActive ? 'dark' : 'light'"
-                    preview-mode
-                  />
+                  <JsonViewer :value="fact.value" expanded :expand-depth="-1"
+                    :theme="q.dark.isActive ? 'dark' : 'light'" preview-mode />
                 </td>
               </tr>
             </tbody>
@@ -232,5 +244,4 @@ onMounted(() => {
   </q-page>
 </template>
 
-<style scoped>
-</style>
+<style scoped></style>

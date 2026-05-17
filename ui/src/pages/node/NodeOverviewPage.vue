@@ -4,51 +4,107 @@ import Backend from 'src/client/backend';
 import { useSettingsStore } from 'stores/settings';
 import { PuppetNodeWithEventCount } from 'src/puppet/models/puppet-node';
 import NodeTable from 'components/NodeTable.vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
+import moment from 'moment';
 
 const route = useRoute();
+const router = useRouter();
 const filter = ref('');
 const nodes = ref<PuppetNodeWithEventCount[]>([]);
 const settings = useSettingsStore();
 const isLoading = ref(false);
 const statusFilter = ref<string[]>();
-const statusOptions = ['failed', 'changed', 'unchanged', 'pending'];
+const statusOptions = ['failed', 'changed', 'unchanged', 'pending', 'unreported'];
+const unreportedDate = ref<moment.Moment>();
 
-function loadData() {
-  if (!settings.environment) return;
-  isLoading.value = true;
-  void Backend.getViewNodeOverview(settings.environment, statusFilter.value).then(
-    (result) => {
-      if (result.status === 200) {
-        nodes.value = result.data.Data.map((s) =>
-          PuppetNodeWithEventCount.fromApi(s)
-        );
-      }
+function loadMeta() {
+  void Backend.getMeta().then((result) => {
+    if (result.status === 200 && result.data.Data.UnreportedHours) {
+      unreportedDate.value = moment().subtract(
+        moment.duration(result.data.Data.UnreportedHours, 'hours'),
+      );
     }
-  ).finally(() => {
-    isLoading.value = false;
   });
 }
 
+function loadData() {
+  if (!settings.environment) return;
+  const env = settings.hasEnvironment() ? settings.environment : undefined;
+  const hasUnreported = statusFilter.value?.includes('unreported');
+  const apiStatuses = hasUnreported ? undefined : statusFilter.value;
+  isLoading.value = true;
+  void Backend.getViewNodeOverview(env, apiStatuses)
+    .then((result) => {
+      if (result.status === 200) {
+        nodes.value = result.data.Data.map((s) =>
+          PuppetNodeWithEventCount.fromApi(s),
+        );
+      }
+    })
+    .finally(() => {
+      isLoading.value = false;
+    });
+}
+
 const filteredNodes = computed(() => {
-  return nodes.value.filter((s) => s.certname.includes(filter.value));
+  let result = nodes.value.filter((s) => s.certname.includes(filter.value));
+
+  if (statusFilter.value?.includes('unreported')) {
+    const ud = unreportedDate.value;
+    const otherStatuses = statusFilter.value.filter((s) => s !== 'unreported');
+    result = result.filter((s) => {
+      const isUnreported = !s.report_timestamp || (ud ? ud.isAfter(s.report_timestamp) : false);
+      if (otherStatuses.length === 0) return isUnreported;
+      return isUnreported || otherStatuses.includes(s.latest_report_status);
+    });
+  }
+
+  return result;
+});
+
+function updateRoute() {
+  void router.replace({
+    name: route.name,
+    query: {
+      filter: filter.value,
+      status: statusFilter.value,
+    },
+  });
+}
+
+watch(filter, () => {
+  updateRoute();
 });
 
 watch(statusFilter, () => {
-  loadData()
-})
+  loadData();
+  updateRoute();
+});
+
 watch(settings, () => {
   loadData();
 });
 
 onMounted(() => {
+  loadMeta();
+
   if (route.query.status) {
-    statusFilter.value = [route.query.status as string];
+    const s = route.query.status;
+    statusFilter.value = (Array.isArray(s) ? s : [s]).filter((v): v is string => v !== null);
   }
-  loadData();
+
+  if (route.query.filter) {
+    filter.value = route.query.filter as string;
+  }
+
+  watch(
+    () => settings.environment,
+    () => {
+      loadData();
+    },
+    { immediate: true },
+  );
 });
-
-
 </script>
 
 <template>

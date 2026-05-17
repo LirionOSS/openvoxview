@@ -3,16 +3,21 @@ import DashboardItem from 'components/DashboardItem.vue';
 import NodeTable from 'components/NodeTable.vue';
 import Backend from 'src/client/backend';
 import { PuppetNodeWithEventCount } from 'src/puppet/models/puppet-node';
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useSettingsStore } from 'stores/settings';
 import PqlQuery, { PqlEntity } from 'src/puppet/query-builder';
 import { useQuasar } from 'quasar';
+import { type ApiMeta } from 'src/client/models';
+import moment from 'moment';
 
 const q = useQuasar();
 const nodes = ref<PuppetNodeWithEventCount[]>([]);
 const settings = useSettingsStore();
 const population = ref(0);
 const resources = ref(0);
+const meta = ref<ApiMeta>();
+const unreportedDuration = ref<moment.Duration>();
+const unreportedDate = ref<moment.Moment>();
 
 const avg_resources_per_node = computed(() => {
   return resources.value / population.value;
@@ -35,8 +40,23 @@ const pending = computed(() => {
   return nodes.value.filter((s) => s.latest_report_status == 'pending').length;
 });
 
-const nodesNotEqualUnchaged = computed(() => {
-  return nodes.value.filter((s) => s.latest_report_status != 'unchanged');
+const nodesNotEqualUnchanged = computed(() => {
+  const ud = unreportedDate.value;
+  return nodes.value
+    .filter((s) =>
+      s.latest_report_status != 'unchanged' || !s.report_timestamp || ud?.isAfter(s.report_timestamp)
+    )
+    .sort((a, b) => {
+      if (!a.report_timestamp) return 1;
+      if (!b.report_timestamp) return -1;
+      return new Date(b.report_timestamp).getTime() - new Date(a.report_timestamp).getTime();
+    });
+});
+
+const unreported = computed(() => {
+  const ud = unreportedDate.value;
+  if (!ud) return 0;
+  return nodes.value.filter((s) => !s.report_timestamp || ud.isAfter(s.report_timestamp)).length;
 });
 
 type CountResult = {
@@ -61,7 +81,9 @@ function loadPopulation() {
 function loadResources() {
   if (!settings.environment) return;
   const builder = new PqlQuery(PqlEntity.Resources);
-  builder.filter().and().equal('environment', settings.environment);
+  if (settings.hasEnvironment()) {
+    builder.filter().and().equal('environment', settings.environment);
+  }
   builder.addProjectionField('count()');
 
   void Backend.getQueryResult<CountResult[]>(builder).then((result) => {
@@ -73,19 +95,45 @@ function loadResources() {
 
 function loadData() {
   if (!settings.environment) return;
-  void Backend.getViewNodeOverview(settings.environment).then((result) => {
+  const env = settings.hasEnvironment() ? settings.environment : undefined;
+  void Backend.getViewNodeOverview(env).then((result) => {
     if (result.status === 200) {
       nodes.value = result.data.Data.map((s) =>
-        PuppetNodeWithEventCount.fromApi(s)
+        PuppetNodeWithEventCount.fromApi(s),
       );
     }
   });
 }
 
-onMounted(() => {
+function loadMeta() {
+  void Backend.getMeta().then((result) => {
+    if (result.status === 200) {
+      meta.value = result.data.Data;
+
+      if (meta.value.UnreportedHours) {
+        unreportedDuration.value = moment.duration(meta.value.UnreportedHours, 'hours');
+        unreportedDate.value = moment().subtract(unreportedDuration.value);
+      }
+    }
+  });
+}
+
+function load() {
   loadPopulation();
   loadResources();
   loadData();
+}
+
+onMounted(() => {
+  loadMeta();
+
+  watch(
+    () => settings.environment,
+    () => {
+      load();
+    },
+    { immediate: true },
+  );
 });
 </script>
 
@@ -122,10 +170,11 @@ onMounted(() => {
         :to="{ name: 'NodeOverview', query: { status: 'unchanged' } }"
       />
       <DashboardItem
-        :model-value="0"
+        :model-value="unreported"
         suffix="nodes"
-        caption="unreported in last 3 hours"
+        :caption="$t('LABEL_UNREPORTED', { dur: unreportedDuration?.humanize() })"
         title_color="secondary"
+        :to="{ name: 'NodeOverview', query: { status: 'unreported' } }"
       />
       <DashboardItem
         v-model="population"
@@ -145,11 +194,8 @@ onMounted(() => {
       />
     </div>
     <div class="row">
-      <NodeTable
-        class="q-ma-md col"
-        v-model:nodes="nodesNotEqualUnchaged"
-        disable_pagination
-      />
+      <NodeTable class="q-ma-md col" v-model:nodes="nodesNotEqualUnchanged" :unreported_date="unreportedDate?.toDate()"
+        disable_pagination />
     </div>
   </q-page>
 </template>

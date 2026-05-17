@@ -9,6 +9,7 @@ builds:
     ldflags: -s -w -X 'main.VERSION={{.Version}}' -X 'main.COMMIT={{.Commit}}'
     env:
       - CGO_ENABLED=0
+      - GIN_MODE=release
     goos:
       - linux
       - freebsd
@@ -29,6 +30,12 @@ nfpms:
       formats:
           - deb
           - rpm
+dockers_v2:
+    - images:
+        - "ghcr.io/voxpupuli/{{ .ProjectName }}"
+      dockerfile: Containerfile.release
+      platforms:
+        - linux/amd64
 release:
   github:
     owner: voxpupuli

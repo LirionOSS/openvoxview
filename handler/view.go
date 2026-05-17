@@ -56,34 +56,30 @@ func (h *ViewHandler) NodesOverview(c *gin.Context) {
 		return
 	}
 
-	nodesQuery := &puppetdb.PdbQuery{
-		Query: []any{},
-	}
+	nodesQuery := &puppetdb.PdbQuery{}
 
 	if nodesOverviewQuery.HasEnvironment() {
-		nodesQuery.Query = append(nodesQuery.Query,
-			"and",
-			[]any{
-				"=",
-				"catalog_environment",
-				nodesOverviewQuery.Environment,
-			})
+		nodesQuery.Query = []any{"=", "catalog_environment", nodesOverviewQuery.Environment}
 	}
 
 	if len(nodesOverviewQuery.Status) > 0 {
-		orQuery := []any{
-			"or",
-		}
+		statusQueries := []any(nil)
 
 		for _, status := range nodesOverviewQuery.Status {
-			orQuery = append(orQuery, []any{"=", "latest_report_status", status})
+			statusQuery := []any{"=", "latest_report_status", status}
+
+			if statusQueries == nil {
+				statusQueries = statusQuery
+			} else {
+				statusQueries = []any{"or", statusQueries, statusQuery}
+			}
 		}
 
-		nodesQuery.Query = append(nodesQuery.Query, orQuery)
-	}
-
-	if len(nodesQuery.Query) == 0 {
-		nodesQuery = nil
+		if nodesQuery.Query == nil {
+			nodesQuery.Query = statusQueries
+		} else {
+			nodesQuery.Query = []any{"and", nodesQuery.Query, statusQueries}
+		}
 	}
 
 	nodes, err := dbClient.GetNodes(nodesQuery)
@@ -193,4 +189,25 @@ func (h *ViewHandler) PredefinedViewsResult(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, NewSuccessResponse(result))
+}
+
+func (h *ViewHandler) PredefinedViewsMeta(c *gin.Context) {
+	viewName := c.Param("viewName")
+
+	if viewName == "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, NewErrorResponse(errors.New("no view name")))
+		return
+	}
+
+	i := slices.IndexFunc(h.config.Views, func(n model.View) bool {
+		return n.Name == viewName
+	})
+
+	if i < 0 {
+		c.AbortWithStatusJSON(http.StatusNotFound, NewErrorResponse(errors.New("view does not exists")))
+		return
+	}
+
+	predefinedView := h.config.Views[i]
+	c.JSON(http.StatusOK, NewSuccessResponse(predefinedView))
 }

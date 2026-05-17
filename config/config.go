@@ -4,12 +4,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/sebastianrakel/openvoxview/model"
 	"github.com/spf13/viper"
 )
 
-var configPath = flag.String("config", "config.yml", "path to the config file ")
+var configPath = flag.String("config", "", "path to the config file")
 var printVersion = flag.Bool("version", false, "prints version")
 
 func init() {
@@ -22,9 +23,10 @@ type ConfigPqlQuery struct {
 }
 
 type Config struct {
-	Listen   string `mapstructure:"listen"`
-	Port     uint64 `mapstructure:"port"`
-	PuppetDB struct {
+	Listen         string   `mapstructure:"listen"`
+	Port           uint64   `mapstructure:"port"`
+	TrustedProxies []string `mapstructure:"trusted_proxies"`
+	PuppetDB       struct {
 		Host      string `mapstructure:"host"`
 		Port      uint64 `mapstructure:"port"`
 		TLS       bool   `mapstructure:"tls"`
@@ -33,8 +35,21 @@ type Config struct {
 		TLS_KEY   string `mapstructure:"tls_key"`
 		TLS_CERT  string `mapstructure:"tls_cert"`
 	} `mapstructure:"puppetdb"`
-	PqlQueries []ConfigPqlQuery `mapstructure:"queries"`
-	Views      []model.View     `mapstructure:"views"`
+	PqlQueries      []ConfigPqlQuery `mapstructure:"queries"`
+	Views           []model.View     `mapstructure:"views"`
+	UnreportedHours uint64           `mapstructure:"unreported_hours"`
+	StripPathPrefix string           `mapstructure:"strip_path_prefix"`
+	PuppetCA        struct {
+		Host            string `mapstructure:"host"`
+		Port            uint64 `mapstructure:"port"`
+		TLS             bool   `mapstructure:"tls"`
+		TLSIgnore       bool   `mapstructure:"tls_ignore"`
+		TLS_CA          string `mapstructure:"tls_ca"`
+		TLS_KEY         string `mapstructure:"tls_key"`
+		TLS_CERT        string `mapstructure:"tls_cert"`
+		ReadOnly        bool   `mapstructure:"readonly"`
+		DeactivateNodes bool   `mapstructure:"deactivate_nodes"`
+	} `mapstructure:"puppetca"`
 }
 
 func PrintVersion(version string) bool {
@@ -45,40 +60,68 @@ func PrintVersion(version string) bool {
 	return false
 }
 
+var (
+	cachedConfig *Config
+	cachedErr    error
+	configOnce   sync.Once
+)
+
 func GetConfig() (*Config, error) {
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(".")
+	configOnce.Do(func() {
+		viper.SetConfigName("config")
+		viper.SetConfigType("yaml")
+		viper.AddConfigPath(".")
 
-	if configPath != nil {
-		log.Printf("Using config: %s", *configPath)
-		viper.SetConfigFile(*configPath)
-	}
+		if *configPath != "" {
+			log.Printf("Using config: %s", *configPath)
+			viper.SetConfigFile(*configPath)
+		}
 
-	viper.SetDefault("port", 5000)
-	viper.SetDefault("puppetdb.host", "localhost")
-	viper.SetDefault("puppetdb.port", 8080)
-	viper.SetDefault("puppetdb.tls_ignore", false)
+		viper.SetDefault("port", 5000)
+		viper.SetDefault("puppetdb.host", "localhost")
+		viper.SetDefault("puppetdb.port", 8080)
+		viper.SetDefault("puppetdb.tls_ignore", false)
+		viper.SetDefault("unreported_hours", 3)
+		viper.SetDefault("strip_path_prefix", `/etc/puppetlabs/code/environments(/.*?/modules)?`)
+		viper.SetDefault("puppetca.port", 8140)
+		viper.SetDefault("puppetca.tls", true)
+		viper.SetDefault("puppetca.tls_ignore", false)
+		viper.SetDefault("puppetca.readonly", true)
+		viper.SetDefault("puppetca.deactivate_nodes", false)
 
-	viper.AutomaticEnv()
+		viper.AutomaticEnv()
 
-	viper.BindEnv("port", "PORT")
-	viper.BindEnv("listen", "LISTEN")
-	viper.BindEnv("puppetdb.port", "PUPPETDB_PORT")
-	viper.BindEnv("puppetdb.host", "PUPPETDB_HOST")
-	viper.BindEnv("puppetdb.tls", "PUPPETDB_TLS")
-	viper.BindEnv("puppetdb.tls_ignore", "PUPPETDB_TLS_IGNORE")
-	viper.BindEnv("puppetdb.tls_ca", "PUPPETDB_TLS_CA")
-	viper.BindEnv("puppetdb.tls_key", "PUPPETDB_TLS_KEY")
-	viper.BindEnv("puppetdb.tls_cert", "PUPPETDB_TLS_CERT")
+		viper.BindEnv("port", "PORT")
+		viper.BindEnv("listen", "LISTEN")
+		viper.BindEnv("trusted_proxies", "TRUSTED_PROXIES")
+		viper.BindEnv("puppetdb.port", "PUPPETDB_PORT")
+		viper.BindEnv("puppetdb.host", "PUPPETDB_HOST")
+		viper.BindEnv("puppetdb.tls", "PUPPETDB_TLS")
+		viper.BindEnv("puppetdb.tls_ignore", "PUPPETDB_TLS_IGNORE")
+		viper.BindEnv("puppetdb.tls_ca", "PUPPETDB_TLS_CA")
+		viper.BindEnv("puppetdb.tls_key", "PUPPETDB_TLS_KEY")
+		viper.BindEnv("puppetdb.tls_cert", "PUPPETDB_TLS_CERT")
+		viper.BindEnv("unreported_hours", "UNREPORTED_HOURS")
+		viper.BindEnv("strip_path_prefix", "STRIP_PATH_PREFIX")
+		viper.BindEnv("puppetca.host", "PUPPETCA_HOST")
+		viper.BindEnv("puppetca.port", "PUPPETCA_PORT")
+		viper.BindEnv("puppetca.tls", "PUPPETCA_TLS")
+		viper.BindEnv("puppetca.tls_ignore", "PUPPETCA_TLS_IGNORE")
+		viper.BindEnv("puppetca.tls_ca", "PUPPETCA_TLS_CA")
+		viper.BindEnv("puppetca.tls_key", "PUPPETCA_TLS_KEY")
+		viper.BindEnv("puppetca.tls_cert", "PUPPETCA_TLS_CERT")
+		viper.BindEnv("puppetca.readonly", "PUPPETCA_READONLY")
+		viper.BindEnv("puppetca.deactivate_nodes", "PUPPETCA_DEACTIVATE_NODES")
 
-	viper.ReadInConfig()
+		viper.ReadInConfig()
 
-	var cfg Config
+		var cfg Config
+		cachedErr = viper.Unmarshal(&cfg)
+		cfg.TrustedProxies = viper.GetStringSlice("trusted_proxies")
+		cachedConfig = &cfg
+	})
 
-	err := viper.Unmarshal(&cfg)
-
-	return &cfg, err
+	return cachedConfig, cachedErr
 }
 
 func (c *Config) GetPuppetDbAddress() string {
@@ -88,4 +131,13 @@ func (c *Config) GetPuppetDbAddress() string {
 	}
 
 	return fmt.Sprintf("%s://%s:%d", scheme, c.PuppetDB.Host, c.PuppetDB.Port)
+}
+
+func (c *Config) GetPuppetCAAddress() string {
+	scheme := "http"
+	if c.PuppetCA.TLS {
+		scheme = "https"
+	}
+
+	return fmt.Sprintf("%s://%s:%d", scheme, c.PuppetCA.Host, c.PuppetCA.Port)
 }

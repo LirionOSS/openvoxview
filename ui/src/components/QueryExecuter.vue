@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /* eslint-disable  @typescript-eslint/no-explicit-any */
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import Backend from 'src/client/backend';
 import { type PuppetQueryResult } from 'src/puppet/models';
 import { JsonViewer } from 'vue3-json-viewer';
@@ -13,6 +13,8 @@ import {
   formatTimestamp,
   copyToClipboard,
 } from 'src/helper/functions';
+import { type AxiosError } from 'axios';
+import { type ErrorResponse } from 'src/client/models';
 
 interface SelectedItem {
   name: string;
@@ -27,15 +29,55 @@ const tab = ref('data');
 const showJsonDialog = ref(false);
 const selectedItem = ref<SelectedItem>();
 const q = useQuasar();
+const queryError = ref();
+
+const queryParameters = ref<Record<string, string>>({});
+
+watch(query, () => {
+  const params: Record<string, string> = queryParameters.value;
+  const regex = /\$\{([^}]+)\}/g;
+  const currentNames = [];
+  let match;
+  while ((match = regex.exec(query.value ?? '')) !== null) {
+    const name = match[1]!;
+    if (!Object.keys(params).includes(name)) {
+      params[name] = '';
+    }
+    currentNames.push(name);
+  }
+
+  for (const param of Object.keys(params)) {
+    if (!currentNames.includes(param)) {
+      delete params[param];
+    }
+  }
+
+  queryParameters.value = params;
+});
+
+function buildQueryWithParameters(): string {
+  let builtQuery = query.value ?? '';
+  for (const [param, value] of Object.entries(queryParameters.value)) {
+    builtQuery = builtQuery.replaceAll('${' + param + '}', value);
+  }
+  return builtQuery;
+}
 
 function executeQuery() {
-  console.log('executing: ', query.value);
-  if (!query.value) return;
+  const queryWithParams = buildQueryWithParameters();
+  console.log('executing: ', queryWithParams);
+  if (!queryWithParams) return;
   isLoading.value = true;
-  void Backend.getRawQueryResult<unknown[]>(query.value, true)
+  void Backend.getRawQueryResult<unknown[]>(queryWithParams, true)
     .then((result) => {
       if (result.status === 200) {
         data.value = result.data.Data;
+        queryError.value = null;
+      }
+    })
+    .catch((error: AxiosError<ErrorResponse>) => {
+      if (error.status === 400) {
+        queryError.value = error.response?.data.Error;
       }
     })
     .finally(() => {
@@ -87,6 +129,38 @@ function copyTimestampToClipboard(timestamp: Date) {
         placeholder="nodes {}"
         @keyup.ctrl.enter="executeQuery"
       />
+      <q-list
+        v-if="queryParameters && Object.keys(queryParameters).length > 0"
+        class="q-mt-md q-pa-none"
+      >
+        <q-item>
+          <q-item-section>
+            <q-item-label title>
+              {{ t('LABEL_PARAMETER', 2) }}
+            </q-item-label>
+          </q-item-section>
+        </q-item>
+        <q-item v-for="param in Object.keys(queryParameters)" :key="param">
+          <q-item-section side>
+            <q-icon name="label" />
+          </q-item-section>
+          <q-item-section>
+            <q-item-label>
+              <q-input v-model="queryParameters[param]" :label="param" />
+            </q-item-label>
+          </q-item-section>
+        </q-item>
+        <q-item>
+          <q-item-section>
+            <q-item-label caption>{{
+              $t('LABEL_RENDERED_QUERY')
+            }}</q-item-label>
+            <q-item-label>
+              <pre>{{ buildQueryWithParameters() }}</pre>
+            </q-item-label>
+          </q-item-section>
+        </q-item>
+      </q-list>
       <q-btn
         label="Execute"
         class="q-mt-lg"
@@ -101,7 +175,18 @@ function copyTimestampToClipboard(timestamp: Date) {
         />
       </q-btn>
     </q-card-section>
-    <q-card-section v-if="data">
+    <q-card-section v-if="queryError">
+      <q-input
+        :label="$t('LABEL_ERROR')"
+        v-model="queryError"
+        readonly
+        type="textarea"
+        color="negative"
+        autogrow
+        label-color="negative"
+      />
+    </q-card-section>
+    <q-card-section v-if="data && !queryError">
       <q-tabs
         v-model="tab"
         dense
@@ -119,8 +204,8 @@ function copyTimestampToClipboard(timestamp: Date) {
       <q-separator />
 
       <q-tab-panels v-model="tab" animated>
-        <q-tab-panel v-if="data.Data" name="data">
-          <q-table :rows="data.Data">
+        <q-tab-panel v-if="data.Data" name="data" class="q-pa-none">
+          <q-table :rows="data.Data" flat>
             <template v-slot:body="props">
               <q-tr :props="props">
                 <q-td v-for="col in props.cols" :key="col.name" :props="props">
@@ -139,7 +224,7 @@ function copyTimestampToClipboard(timestamp: Date) {
           </q-table>
         </q-tab-panel>
 
-        <q-tab-panel v-if="data.Data" name="json">
+        <q-tab-panel v-if="data.Data" name="json" class="q-pa-none">
           <JsonViewer
             :value="data.Data"
             expanded
@@ -149,24 +234,24 @@ function copyTimestampToClipboard(timestamp: Date) {
           />
         </q-tab-panel>
 
-        <q-tab-panel name="meta">
+        <q-tab-panel name="meta" class="q-pa-none">
           <q-list>
             <q-item>
               <q-item-section>
-                <q-item-label caption>{{
-                  $t('LABEL_EXECUTION_TIME')
-                }}</q-item-label>
+                <q-item-label caption
+                  >{{ $t('LABEL_EXECUTION_TIME') }}
+                </q-item-label>
 
-                <q-item-label>{{
-                  formatDuration(data.ExecutionTimeInMilli)
-                }}</q-item-label>
+                <q-item-label
+                  >{{ formatDuration(data.ExecutionTimeInMilli) }}
+                </q-item-label>
               </q-item-section>
             </q-item>
             <q-item>
               <q-item-section>
-                <q-item-label caption>{{
-                  t('LABEL_EXECUTED_ON')
-                }}</q-item-label>
+                <q-item-label caption
+                  >{{ t('LABEL_EXECUTED_ON') }}
+                </q-item-label>
                 <q-item-label
                   @click="copyTimestampToClipboard(data.ExecutedOn)"
                 >
@@ -192,4 +277,12 @@ function copyTimestampToClipboard(timestamp: Date) {
   </q-card>
 </template>
 
-<style scoped></style>
+<style scoped>
+pre {
+  white-space: pre-wrap; /* Since CSS 2.1 */
+  white-space: -moz-pre-wrap; /* Mozilla, since 1999 */
+  white-space: -pre-wrap; /* Opera 4-6 */
+  white-space: -o-pre-wrap; /* Opera 7 */
+  word-wrap: break-word; /* Internet Explorer 5.5+ */
+}
+</style>

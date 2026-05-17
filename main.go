@@ -30,6 +30,7 @@ func main() {
 	log.Printf("LISTEN: %s", cfg.Listen)
 	log.Printf("PORT: %d", cfg.Port)
 	log.Printf("PUPPETDB_ADDRESS: %s", cfg.GetPuppetDbAddress())
+	log.Printf("TRUSTED_PROXIES: %#v", cfg.TrustedProxies)
 
 	r := gin.Default()
 
@@ -47,11 +48,34 @@ func main() {
 
 	r.Use(AllowCORS)
 
+	if len(cfg.TrustedProxies) > 0 {
+		r.SetTrustedProxies(cfg.TrustedProxies)
+	}
+
+	caEnabled := cfg.PuppetCA.Host != ""
+
 	pdbHandler := handler.NewPdbHandler(cfg)
 	viewHandler := handler.NewViewHandler(cfg)
 
 	api := r.Group("/api/v1/")
 	{
+		api.GET("meta", func(c *gin.Context) {
+			type metaResponse struct {
+				CaEnabled       bool
+				CaReadOnly      bool
+				UnreportedHours uint64
+				StripPathPrefix string
+			}
+
+			response := metaResponse{
+				CaEnabled:       caEnabled,
+				CaReadOnly:      cfg.PuppetCA.ReadOnly,
+				UnreportedHours: cfg.UnreportedHours,
+				StripPathPrefix: cfg.StripPathPrefix,
+			}
+
+			c.JSON(http.StatusOK, handler.NewSuccessResponse(response))
+		})
 		api.GET("version", func(c *gin.Context) {
 			type versionResponse struct {
 				Version string
@@ -69,6 +93,7 @@ func main() {
 			view.GET("metrics", viewHandler.Metrics)
 			view.GET("predefined", viewHandler.PredefinedViews)
 			view.GET("predefined/:viewName", viewHandler.PredefinedViewsResult)
+			view.GET("predefined/:viewName/meta", viewHandler.PredefinedViewsMeta)
 		}
 
 		pdb := api.Group("pdb")
@@ -78,6 +103,18 @@ func main() {
 			pdb.GET("query/predefined", pdbHandler.PdbQueryPredefined)
 			pdb.GET("fact-names", pdbHandler.PdbGetFactNames)
 			pdb.POST("event-counts", pdbHandler.PdbGetEventCounts)
+		}
+	}
+
+	if caEnabled {
+		caHandler := handler.NewCaHandler(cfg)
+		ca := api.Group("ca")
+
+		ca.POST("status", caHandler.QueryCertificateStatuses)
+		if !cfg.PuppetCA.ReadOnly {
+			ca.POST("status/:name/sign", caHandler.SignCertificate)
+			ca.POST("status/:name/revoke", caHandler.RevokeCertificate)
+			ca.DELETE("status/:name", caHandler.CleanCertificate)
 		}
 	}
 
